@@ -36,8 +36,19 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 def _setup_resume() -> None:
-    """Prompt for resume file and copy into APP_DIR."""
-    console.print(Panel("[bold]Step 1: Resume[/bold]\nPoint to your master resume file (.txt or .pdf)."))
+    """Prompt for resume file and copy into the active profile dir."""
+    from applypilot.profiles import router as _profiles
+    _profiles.migrate_legacy()
+    active_dir = _profiles.profile_dir()
+    active_dir.mkdir(parents=True, exist_ok=True)
+    target_txt = _profiles.resume_text()
+    target_pdf = _profiles.resume_pdf()
+
+    console.print(Panel(
+        f"[bold]Step 1: Resume[/bold]\n"
+        f"Point to your master resume file (.txt or .pdf).\n"
+        f"Saving to active profile: [cyan]{_profiles.get_active()}[/cyan]"
+    ))
 
     while True:
         path_str = Prompt.ask("Resume file path")
@@ -53,11 +64,11 @@ def _setup_resume() -> None:
             continue
 
         if suffix == ".txt":
-            shutil.copy2(src, RESUME_PATH)
-            console.print(f"[green]Copied to {RESUME_PATH}[/green]")
+            shutil.copy2(src, target_txt)
+            console.print(f"[green]Copied to {target_txt}[/green]")
         elif suffix == ".pdf":
-            shutil.copy2(src, RESUME_PDF_PATH)
-            console.print(f"[green]Copied to {RESUME_PDF_PATH}[/green]")
+            shutil.copy2(src, target_pdf)
+            console.print(f"[green]Copied to {target_pdf}[/green]")
 
             # Also ask for a plain-text version for LLM consumption
             txt_path_str = Prompt.ask(
@@ -67,8 +78,8 @@ def _setup_resume() -> None:
             if txt_path_str.strip():
                 txt_src = Path(txt_path_str.strip().strip('"').strip("'")).expanduser().resolve()
                 if txt_src.exists():
-                    shutil.copy2(txt_src, RESUME_PATH)
-                    console.print(f"[green]Copied to {RESUME_PATH}[/green]")
+                    shutil.copy2(txt_src, target_txt)
+                    console.print(f"[green]Copied to {target_txt}[/green]")
                 else:
                     console.print("[yellow]File not found, skipping plain-text copy.[/yellow]")
         break
@@ -174,9 +185,13 @@ def _setup_profile() -> dict:
         "earliest_start_date": Prompt.ask("Earliest start date", default="Immediately"),
     }
 
-    # Save
-    PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
-    console.print(f"\n[green]Profile saved to {PROFILE_PATH}[/green]")
+    # Save to active profile dir
+    from applypilot.profiles import router as _profiles
+    _profiles.migrate_legacy()
+    target = _profiles.profile_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+    console.print(f"\n[green]Profile saved to {target}[/green]")
     return profile
 
 

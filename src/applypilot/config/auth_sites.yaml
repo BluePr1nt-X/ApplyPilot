@@ -1,0 +1,95 @@
+# Auth vault registry: ATS / employer career sites that require login.
+# Used by `applypilot login <domain>` to know where to send the user.
+#
+# Each entry:
+#   domain         - lowercase host suffix matched against URLs (myworkdayjobs.com)
+#   login_url      - URL to navigate to during interactive seeding
+#   expiry_days    - how long before storage_state is considered stale
+#   aliases        - extra hosts that share the same cookie jar (rarely needed)
+#   notes          - human description (optional)
+#
+# To add your own employer's portal:
+#   1. Add an entry below with the domain (e.g. company.wd1.myworkdayjobs.com).
+#   2. Run: applypilot login <domain>
+
+sites:
+  - domain: myworkdayjobs.com
+    login_url: https://www.myworkdayjobs.com
+    expiry_days: 7
+    notes: "Workday — covers ~all wd1/wd5/wd103.myworkdayjobs.com instances. Most major employers."
+
+  - domain: workday.com
+    login_url: https://www.workday.com/sign-in
+    expiry_days: 7
+    notes: "Workday corporate site"
+
+  - domain: greenhouse.io
+    login_url: https://app.greenhouse.io/users/sign_in
+    expiry_days: 14
+    notes: "Greenhouse ATS — Boards.greenhouse.io and job-boards.greenhouse.io"
+
+  - domain: boards.greenhouse.io
+    login_url: https://boards.greenhouse.io
+    expiry_days: 14
+
+  - domain: lever.co
+    login_url: https://hire.lever.co/login
+    expiry_days: 14
+    notes: "Lever ATS — jobs.lever.co"
+
+  - domain: jobs.lever.co
+    login_url: https://jobs.lever.co
+    expiry_days: 14
+
+  - domain: icims.com
+    login_url: https://login.icims.com
+    expiry_days: 7
+
+  - domain: smartrecruiters.com
+    login_url: https://www.smartrecruiters.com/login
+    expiry_days: 7
+
+  - domain: ashbyhq.com
+    login_url: https://app.ashbyhq.com/login
+    expiry_days: 14
+
+  - domain: jobs.ashbyhq.com
+    login_url: https://jobs.ashbyhq.com
+    expiry_days: 14
+
+  - domain: bamboohr.com
+    login_url: https://www.bamboohr.com/login
+    expiry_days: 14
+
+  - domain: taleo.net
+    login_url: https://www.taleo.net
+    expiry_days: 7
+    notes: "Oracle Taleo — many enterprise career portals"
+
+  - domain: oraclecloud.com
+    login_url: https://www.oracle.com/cloud/sign-in.html
+    expiry_days: 7
+    notes: "Oracle Recruiting Cloud (HCM)"
+
+  - domain: successfactors.com
+    login_url: https://www.successfactors.com
+    expiry_days: 7
+    notes: "SAP SuccessFactors — careers.sap.com etc."
+
+  - domain: workable.com
+    login_url: https://www.workable.com/sign-in
+    expiry_days: 14
+
+  - domain: jobvite.com
+    login_url: https://jobs.jobvite.com
+    expiry_days: 14
+
+  - domain: linkedin.com
+    login_url: https://www.linkedin.com/login
+    expiry_days: 30
+    notes: "LinkedIn — for EasyApply. Note: LinkedIn rotates cookies aggressively."
+
+  - domain: indeed.com
+    login_url: https://secure.indeed.com/account/login
+    expiry_days: 14
+    notes: "Indeed — for one-click apply on partner sites"

@@ -467,8 +467,25 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     Returns:
         {"approved": int, "failed": int, "errors": int, "elapsed": float}
     """
-    profile = load_profile()
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
+    from applypilot.profiles import router as _profiles
+    # Per-job profile cache: avoid re-reading the same profile.json N times.
+    _profile_cache: dict[str, tuple[dict, str]] = {}
+
+    def _profile_for(job: dict) -> tuple[str, dict, str]:
+        """Resolve (name, profile_dict, resume_text) for one job."""
+        name = _profiles.resolve_job_profile(job)
+        if name not in _profile_cache:
+            try:
+                pdata = _profiles.load_profile(name)
+                rtxt = _profiles.load_resume_text(name)
+            except FileNotFoundError:
+                # Fall back to active profile if the tagged one is missing.
+                pdata = _profiles.load_profile()
+                rtxt = _profiles.load_resume_text()
+                name = _profiles.get_active()
+            _profile_cache[name] = (pdata, rtxt)
+        return (name, *_profile_cache[name])
+
     conn = get_connection()
 
     jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
@@ -487,6 +504,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     for job in jobs:
         completed += 1
         try:
+            profile_name, profile, resume_text = _profile_for(job)
             tailored, report = tailor_resume(resume_text, job, profile,
                                              validation_mode=validation_mode)
 
@@ -518,10 +536,31 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             # Generate PDF for approved resumes (best-effort)
             # "approved_with_judge_warning" is also a success — resume was generated.
             pdf_path = None
+            pdf_engine_used = None
+            pdf_validated = None
             if report["status"] in ("approved", "approved_with_judge_warning"):
                 try:
-                    from applypilot.scoring.pdf import convert_to_pdf
-                    pdf_path = str(convert_to_pdf(txt_path))
+                    from applypilot.scoring.pdf import convert_to_pdf, _pick_engine_for_url
+                    chosen_engine = _pick_engine_for_url(
+                        job.get("application_url") or job.get("url")
+                    )
+                    pdf_path = str(convert_to_pdf(txt_path, engine=chosen_engine))
+                    pdf_engine_used = chosen_engine
+
+                    try:
+                        from applypilot.scoring.pdf_validator import validate_pdf
+                        validation = validate_pdf(pdf_path, expected_text=resume_text)
+                        pdf_validated = 1 if validation.passed else 0
+                        if not validation.passed:
+                            log.warning(
+                                "PDF validation soft-fail for %s: missing %s",
+                                txt_path.name, validation.missing_tokens,
+                            )
+                    except ImportError:
+                        # pdfplumber not installed — validator is optional
+                        pass
+                    except Exception:
+                        log.debug("validator failed", exc_info=True)
                 except Exception:
                     log.debug("PDF generation failed for %s", txt_path, exc_info=True)
 
@@ -529,15 +568,20 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                 "url": job["url"],
                 "path": str(txt_path),
                 "pdf_path": pdf_path,
+                "pdf_engine": pdf_engine_used,
+                "pdf_validated": pdf_validated,
                 "title": job["title"],
                 "site": job["site"],
                 "status": report["status"],
                 "attempts": report["attempts"],
+                "profile": profile_name,
             }
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],
                 "status": "error", "attempts": 0, "path": None, "pdf_path": None,
+                "pdf_engine": None, "pdf_validated": None,
+                "profile": None,
             }
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
@@ -562,8 +606,11 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
         if r["status"] in _success_statuses:
             conn.execute(
                 "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
+                "tailor_attempts=COALESCE(tailor_attempts,0)+1, "
+                "tailored_pdf_engine=?, tailored_pdf_validated=?, "
+                "target_profile=COALESCE(?, target_profile) WHERE url=?",
+                (r["path"], now, r.get("pdf_engine"),
+                 r.get("pdf_validated"), r.get("profile"), r["url"]),
             )
         else:
             conn.execute(

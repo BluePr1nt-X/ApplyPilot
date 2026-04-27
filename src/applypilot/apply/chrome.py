@@ -17,6 +17,12 @@ from applypilot import config
 
 logger = logging.getLogger(__name__)
 
+# Tracks which vault sessions a worker has already injected (per worker_id ->
+# set of domains). Skips re-injection if the same session was already loaded
+# in a previous job on this worker.
+_injected_sessions: dict[int, dict[str, str]] = {}
+_injected_lock = threading.Lock()
+
 # CDP port base — each worker uses BASE_CDP_PORT + worker_id
 BASE_CDP_PORT = 9222
 
@@ -183,11 +189,128 @@ def _suppress_restore_nag(profile_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Vault cookie injection
+# ---------------------------------------------------------------------------
+
+def _seed_signature(domain: str, storage_state_path: Path) -> str:
+    """Stable id for a vault entry — used to skip re-injection."""
+    try:
+        mtime = Path(storage_state_path).stat().st_mtime_ns
+    except OSError:
+        mtime = 0
+    return f"{domain}:{mtime}"
+
+
+def inject_cookies(worker_id: int, profile_dir: Path,
+                   target_url: str | None = None) -> list[str]:
+    """Inject vault storage_state cookies into a worker's Chrome profile.
+
+    Must be called BEFORE launch_chrome — Playwright opens the user-data-dir
+    in persistent mode to write the cookies, and subprocess Chrome can't
+    coexist with that.
+
+    If `target_url` is provided, only the matching domain's session is loaded.
+    Otherwise, all fresh vault entries are loaded into the same profile.
+
+    Returns the list of domains that were injected (or already present).
+    Logs and returns [] if Playwright is unavailable or the vault is empty.
+    """
+    try:
+        from applypilot.auth import vault
+    except ImportError:
+        return []
+
+    if target_url:
+        hit = vault.lookup_for_url(target_url)
+        if hit is None:
+            return []
+        site, entry, state_path = hit
+        sessions = [(site.domain, state_path)]
+    else:
+        sessions = []
+        for entry in vault.list_sessions():
+            if vault.is_fresh(entry) and entry.storage_state_path:
+                sessions.append((entry.domain, Path(entry.storage_state_path)))
+
+    if not sessions:
+        return []
+
+    # Filter out sessions we've already injected on this worker since their
+    # last refresh. This avoids re-opening Playwright for every job.
+    with _injected_lock:
+        already = _injected_sessions.setdefault(worker_id, {})
+        pending: list[tuple[str, Path]] = []
+        for domain, path in sessions:
+            sig = _seed_signature(domain, path)
+            if already.get(domain) == sig:
+                continue
+            pending.append((domain, path))
+
+    if not pending:
+        return [d for d, _ in sessions]
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.warning("[worker-%d] Vault cookies skipped — playwright not installed", worker_id)
+        return []
+
+    injected_domains: list[str] = []
+    try:
+        with sync_playwright() as p:
+            # Persistent context writes cookies into profile_dir on close.
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            )
+            try:
+                for domain, state_path in pending:
+                    try:
+                        from applypilot.auth.vault import _read_state
+                        state = _read_state(Path(state_path))
+                        cookies = state.get("cookies") or []
+                        if cookies:
+                            context.add_cookies(cookies)
+                        injected_domains.append(domain)
+                        with _injected_lock:
+                            _injected_sessions[worker_id][domain] = _seed_signature(
+                                domain, state_path
+                            )
+                        try:
+                            vault.mark_used(domain)
+                        except Exception:
+                            pass
+                        logger.info(
+                            "[worker-%d] Injected %d cookies for %s",
+                            worker_id, len(cookies), domain,
+                        )
+                    except (OSError, json.JSONDecodeError) as e:
+                        logger.warning("[worker-%d] Skipping %s: %s",
+                                       worker_id, domain, e)
+            finally:
+                context.close()
+    except Exception as e:
+        # Don't crash the apply pipeline if injection fails — just degrade
+        # to "no pre-auth" mode. The agent will hit the login wall and
+        # report the existing login_issue / sso_required failure.
+        logger.warning("[worker-%d] Vault injection failed: %s — continuing",
+                       worker_id, e)
+
+    return injected_domains
+
+
+# ---------------------------------------------------------------------------
 # Chrome launch / kill
 # ---------------------------------------------------------------------------
 
 def launch_chrome(worker_id: int, port: int | None = None,
-                  headless: bool = False) -> subprocess.Popen:
+                  headless: bool = False,
+                  target_url: str | None = None) -> subprocess.Popen:
     """Launch a Chrome instance with remote debugging for a worker.
 
     Args:
@@ -205,6 +328,17 @@ def launch_chrome(worker_id: int, port: int | None = None,
 
     # Kill any zombie Chrome from a previous run on this port
     _kill_on_port(port)
+
+    # Inject any saved vault cookies into the profile dir before subprocess
+    # Chrome opens it. Playwright must close before subprocess Chrome opens
+    # because Chrome locks the user-data-dir while running.
+    try:
+        injected = inject_cookies(worker_id, profile_dir, target_url=target_url)
+        if injected:
+            logger.info("[worker-%d] Pre-authenticated for: %s",
+                        worker_id, ", ".join(injected))
+    except Exception:
+        logger.debug("[worker-%d] inject_cookies failed", worker_id, exc_info=True)
 
     # Patch preferences to suppress restore nag
     _suppress_restore_nag(profile_dir)

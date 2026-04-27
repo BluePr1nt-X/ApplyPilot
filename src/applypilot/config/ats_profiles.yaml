@@ -1,0 +1,37 @@
+# Per-domain PDF rendering overrides.
+#
+# Workday, Taleo, iCIMS, Oracle Recruiting Cloud, and SuccessFactors are
+# parser-strict ATS platforms — they often mis-extract resumes built with
+# multi-column or styled HTML→PDF layouts. We force `ats_safe` (single
+# column, plain Arial, no colors/borders) for those domains.
+#
+# To override per-employer: add a new entry below.
+
+domains:
+  - domain: myworkdayjobs.com
+    engine: ats_safe
+    notes: "Workday is the most common offender — 'Apply with resume parsing' button mangles styled PDFs"
+
+  - domain: workday.com
+    engine: ats_safe
+
+  - domain: taleo.net
+    engine: ats_safe
+
+  - domain: icims.com
+    engine: ats_safe
+
+  - domain: oraclecloud.com
+    engine: ats_safe
+
+  - domain: successfactors.com
+    engine: ats_safe
+
+  - domain: jobvite.com
+    engine: ats_safe
+
+  # Modern ATSes that parse styled PDFs reasonably well — keep the polished
+  # look. (No entry needed; they fall through to the default.)
+  # - domain: greenhouse.io  # default 'modern'
+  # - domain: lever.co       # default 'modern'
+  # - domain: ashbyhq.com    # default 'modern'

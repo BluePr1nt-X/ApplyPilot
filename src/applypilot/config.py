@@ -89,16 +89,44 @@ def ensure_dirs():
     """Create all required directories."""
     for d in [APP_DIR, TAILORED_DIR, COVER_LETTER_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR]:
         d.mkdir(parents=True, exist_ok=True)
+    # Migrate legacy single-profile layout (~/.applypilot/profile.json)
+    # into ~/.applypilot/profiles/default/ on first run.
+    try:
+        from applypilot.profiles import router as _profiles_router
+        _profiles_router.migrate_legacy()
+    except Exception:
+        # Don't crash startup if migration fails — fall back to legacy paths.
+        pass
 
 
-def load_profile() -> dict:
-    """Load user profile from ~/.applypilot/profile.json."""
-    import json
-    if not PROFILE_PATH.exists():
+def get_active_profile_paths() -> tuple[Path, Path, Path]:
+    """Return (profile.json, resume.txt, resume.pdf) for the active profile.
+
+    Falls back to legacy ~/.applypilot/{profile,resume}.* if the profiles
+    package isn't yet initialized (e.g. very first run before ensure_dirs).
+    """
+    try:
+        from applypilot.profiles import router as _r
+        return _r.profile_file(), _r.resume_text(), _r.resume_pdf()
+    except Exception:
+        return (APP_DIR / "profile.json", APP_DIR / "resume.txt", APP_DIR / "resume.pdf")
+
+
+def load_profile(name: str | None = None) -> dict:
+    """Load user profile from the active profile (or named family).
+
+    Args:
+        name: Optional profile name. Defaults to the active profile.
+    """
+    try:
+        from applypilot.profiles import router as _r
+        return _r.load_profile(name)
+    except FileNotFoundError:
+        # Re-raise with a stable message for callers that expect it.
+        active_path, _, _ = get_active_profile_paths()
         raise FileNotFoundError(
-            f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
+            f"Profile not found at {active_path}. Run `applypilot init` first."
         )
-    return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
 
 def load_search_config() -> dict:

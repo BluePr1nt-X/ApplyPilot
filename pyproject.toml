@@ -26,10 +26,16 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "pandas>=2.0",
+    "apscheduler>=3.10",
+    "imapclient>=3.0",
+    "keyring>=24.0",
+    "pdfplumber>=0.10",
+    "cryptography>=41.0",
     ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.1"]
+oauth = ["google-auth>=2.20", "google-auth-oauthlib>=1.0"]
 
 [project.scripts]
 applypilot = "applypilot.cli:app"

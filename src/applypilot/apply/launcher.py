@@ -303,6 +303,14 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         'applied', 'expired', 'captcha', 'login_issue',
         'failed:reason', or 'skipped'.
     """
+    # Reset per-job CAPTCHA counter — kill switch fires if a single job
+    # exceeds CAPSOLVER_PER_JOB_MAX.
+    try:
+        from applypilot import budget
+        budget.clear_job_counter(job.get("url") or "")
+    except Exception:
+        pass
+
     # Read tailored resume text
     resume_path = job.get("tailored_resume_path")
     txt_path = Path(resume_path).with_suffix(".txt") if resume_path else None
@@ -404,8 +412,9 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                                 text_parts.append(block["text"])
                                 lf.write(block["text"] + "\n")
                             elif bt == "tool_use":
+                                tool_name = block.get("name", "")
                                 name = (
-                                    block.get("name", "")
+                                    tool_name
                                     .replace("mcp__playwright__", "")
                                     .replace("mcp__gmail__", "gmail:")
                                 )
@@ -427,6 +436,60 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                                 update_state(worker_id,
                                              actions=cur_actions + 1,
                                              last_action=desc[:35])
+
+                                # CAPTCHA spend tracking + per-job kill switch.
+                                # The agent calls api.capsolver.com/createTask
+                                # via browser_evaluate; budget.py parses the
+                                # body for TASK_TYPE and records the event.
+                                if tool_name.endswith("browser_evaluate"):
+                                    body = inp.get("function") or inp.get("expression") or ""
+                                    try:
+                                        from applypilot import budget
+                                        cnt = budget.record_from_tool_use(
+                                            job.get("url"), body,
+                                        )
+                                        if cnt is not None:
+                                            add_event(
+                                                f"[W{worker_id}] CAPTCHA #{cnt} "
+                                                f"(today=${budget.today_captcha_spend_usd():.3f}/"
+                                                f"${budget.daily_cap_usd():.2f})"
+                                            )
+                                            if budget.is_over_per_job_max(job.get("url") or ""):
+                                                lf.write(
+                                                    f"  !! CAPTCHA loop detected "
+                                                    f"({cnt} >= {budget.per_job_max()}) — "
+                                                    f"killing agent for this job\n"
+                                                )
+                                                add_event(
+                                                    f"[W{worker_id}] CAPTCHA loop "
+                                                    f"({cnt}) — abort"
+                                                )
+                                                try:
+                                                    from applypilot import alerts
+                                                    alerts.notify(
+                                                        "captcha_loop",
+                                                        job_url=job.get("url"),
+                                                        title=job.get("title"),
+                                                        site=job.get("site"),
+                                                        captcha_count=cnt,
+                                                        per_job_max=budget.per_job_max(),
+                                                    )
+                                                except Exception:
+                                                    pass
+                                                # Inject the failure result line
+                                                # into the output so downstream
+                                                # parsing classifies correctly.
+                                                text_parts.append(
+                                                    "RESULT:FAILED:captcha_loop"
+                                                )
+                                                if proc and proc.poll() is None:
+                                                    _kill_process_tree(proc.pid)
+                                                break
+                                    except Exception:
+                                        logger.debug(
+                                            "captcha tracking failed",
+                                            exc_info=True,
+                                        )
                     elif msg_type == "result":
                         stats = {
                             "input_tokens": msg.get("usage", {}).get("input_tokens", 0),
@@ -599,7 +662,11 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
         chrome_proc = None
         try:
             add_event(f"[W{worker_id}] Launching Chrome...")
-            chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
+            apply_target = job.get("application_url") or job.get("url")
+            chrome_proc = launch_chrome(
+                worker_id, port=port, headless=headless,
+                target_url=apply_target,
+            )
 
             result, duration_ms = run_job(job, port=port, worker_id=worker_id,
                                             model=model, dry_run=dry_run)
@@ -621,6 +688,21 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 failed += 1
                 update_state(worker_id, jobs_failed=failed,
                              jobs_done=applied + failed)
+
+                # Surface vault refresh signal so `applypilot login --list`
+                # shows which domain needs re-seeding.
+                if reason == "session_expired" or reason.startswith("session_expired"):
+                    try:
+                        from applypilot.auth import vault as _vault
+                        from urllib.parse import urlparse
+                        host = (urlparse(job.get("application_url") or job.get("url") or "").hostname or "").lower()
+                        for entry in _vault.list_sessions():
+                            if host == entry.domain or host.endswith("." + entry.domain):
+                                _vault.mark_refresh_attempted(entry.domain)
+                                add_event(f"[W{worker_id}] Vault refresh needed: {entry.domain}")
+                                break
+                    except Exception:
+                        logger.debug("vault refresh signal failed", exc_info=True)
 
         except KeyboardInterrupt:
             release_lock(job["url"])

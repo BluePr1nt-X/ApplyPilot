@@ -143,11 +143,15 @@ def _run_cover(min_score: int = 7, validation_mode: str = "normal") -> dict:
         return {"status": f"error: {e}"}
 
 
-def _run_pdf() -> dict:
-    """Stage: PDF conversion — convert tailored resumes and cover letters to PDF."""
+def _run_pdf(engine: str | None = None) -> dict:
+    """Stage: PDF conversion — convert tailored resumes and cover letters to PDF.
+
+    If engine is None, the renderer picks per-job based on application_url
+    + ats_profiles.yaml. Pass 'ats_safe' or 'modern' to force one for all.
+    """
     try:
         from applypilot.scoring.pdf import batch_convert
-        batch_convert()
+        batch_convert(engine=engine)
         return {"status": "ok"}
     except Exception as e:
         log.error("PDF conversion failed: %s", e)
@@ -324,7 +328,8 @@ def _run_stage_streaming(
 # ---------------------------------------------------------------------------
 
 def _run_sequential(ordered: list[str], min_score: int, workers: int = 1,
-                    validation_mode: str = "normal") -> dict:
+                    validation_mode: str = "normal",
+                    pdf_engine: str | None = None) -> dict:
     """Execute stages one at a time (original behavior)."""
     results: list[dict] = []
     errors: dict[str, str] = {}
@@ -347,6 +352,8 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1,
                 kwargs["validation_mode"] = validation_mode
             if name in ("discover", "enrich"):
                 kwargs["workers"] = workers
+            if name == "pdf" and pdf_engine is not None:
+                kwargs["engine"] = pdf_engine
             result = runner(**kwargs)
             elapsed = time.time() - t0
 
@@ -448,6 +455,7 @@ def run_pipeline(
     stream: bool = False,
     workers: int = 1,
     validation_mode: str = "normal",
+    pdf_engine: str | None = None,
 ) -> dict:
     """Run pipeline stages.
 
@@ -501,7 +509,8 @@ def run_pipeline(
                                 validation_mode=validation_mode)
     else:
         result = _run_sequential(ordered, min_score, workers=workers,
-                                 validation_mode=validation_mode)
+                                 validation_mode=validation_mode,
+                                 pdf_engine=pdf_engine)
 
     # Summary table
     console.print(f"\n{'=' * 70}")

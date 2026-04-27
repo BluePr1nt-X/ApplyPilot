@@ -111,7 +111,18 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     Returns:
         {"scored": int, "errors": int, "elapsed": float, "distribution": list}
     """
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
+    from applypilot.profiles import router as _profiles
+    _resume_cache: dict[str, str] = {}
+
+    def _resume_for(job: dict) -> str:
+        name = _profiles.resolve_job_profile(job)
+        if name not in _resume_cache:
+            try:
+                _resume_cache[name] = _profiles.load_resume_text(name)
+            except FileNotFoundError:
+                _resume_cache[name] = _profiles.load_resume_text()
+        return _resume_cache[name]
+
     conn = get_connection()
 
     if rescore:
@@ -138,7 +149,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     results: list[dict] = []
 
     for job in jobs:
-        result = score_job(resume_text, job)
+        result = score_job(_resume_for(job), job)
         result["url"] = job["url"]
         completed += 1
 

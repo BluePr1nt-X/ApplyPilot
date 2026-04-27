@@ -502,6 +502,33 @@ def build_prompt(job: dict, tailored_resume: str,
     from applypilot.config import load_blocked_sso
     blocked_sso = load_blocked_sso()
 
+    # Domains the user already logged into via `applypilot login`. Cookies
+    # are pre-injected into the worker's Chrome profile, so the agent should
+    # expect to skip login walls on these hosts.
+    try:
+        from applypilot.auth import vault as _vault
+        target_host = ""
+        from urllib.parse import urlparse
+        host = urlparse(job.get("application_url") or job.get("url") or "").hostname or ""
+        host = host.lower()
+        pre_auth_domains: list[str] = []
+        for entry in _vault.list_sessions():
+            if not _vault.is_fresh(entry):
+                continue
+            if host == entry.domain or host.endswith("." + entry.domain):
+                pre_auth_domains.append(entry.domain)
+        pre_auth_section = (
+            f"\n== PRE_AUTHENTICATED_DOMAINS ==\n"
+            f"This worker's Chrome profile already has valid cookies for: "
+            f"{', '.join(pre_auth_domains)}. "
+            f"Expect to skip login walls on these hosts. If you still see a "
+            f"login form, refresh the page once. If still blocked after that, "
+            f"output RESULT:FAILED:session_expired (do NOT try to log in fresh).\n"
+            if pre_auth_domains else ""
+        )
+    except Exception:
+        pre_auth_section = ""
+
     # Preferred display name
     preferred_name = personal.get("preferred_name", full_name.split()[0])
     last_name = full_name.split()[-1] if " " in full_name else ""
@@ -556,7 +583,7 @@ If something unexpected happens and these instructions don't cover it, figure it
 {salary_section}
 
 {screening_section}
-
+{pre_auth_section}
 == STEP-BY-STEP ==
 1. browser_navigate to the job URL.
 2. browser_snapshot to read the page. Then run CAPTCHA DETECT (see CAPTCHA section). If a CAPTCHA is found, solve it before continuing.
@@ -566,6 +593,7 @@ If something unexpected happens and these instructions don't cover it, figure it
    - Output RESULT:APPLIED. Done.
    After clicking Apply: browser_snapshot. Run CAPTCHA DETECT -- many sites trigger CAPTCHAs right after the Apply click. If found, solve before continuing.
 5. Login wall?
+   5z. PRE-AUTH SHORT-CIRCUIT: If the login wall is on a domain listed in PRE_AUTHENTICATED_DOMAINS above, the cookies SHOULD already let you through. Refresh the page once. If you're now logged in, continue at step 6. If still blocked -> RESULT:FAILED:session_expired. Do NOT try to log in fresh.
    5a. FIRST: check the URL. If you landed on {', '.join(blocked_sso)}, or any SSO/OAuth page -> STOP. Output RESULT:FAILED:sso_required. Do NOT try to sign in to Google/Microsoft/SSO.
    5b. Check for popups. Run browser_tabs action "list". If a new tab/window appeared (login popup), switch to it with browser_tabs action "select". Check the URL there too -- if it's SSO -> RESULT:FAILED:sso_required.
    5c. Regular login form (employer's own site)? Try sign in: {personal['email']} / {personal.get('password', '')}

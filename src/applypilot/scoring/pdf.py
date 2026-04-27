@@ -331,6 +331,122 @@ li {{
 </html>"""
 
 
+# ── ATS-Safe HTML template ───────────────────────────────────────────────
+
+def build_html_ats_safe(resume: dict) -> str:
+    """Build a strictly ATS-parser-friendly HTML for the tailored resume.
+
+    Differences from build_html:
+      - Pure black text on white. No colors, no borders, no SVG.
+      - Single column, single font family (Arial / Helvetica fallback).
+      - No <ul>; bullets are rendered as `- ` text inside <p>.
+      - No multi-column or table layouts that confuse Workday/Taleo parsers.
+      - Plain section headings as bold <h2>, not styled bars.
+    """
+    sections = resume["sections"]
+
+    def _bullets(items: list[str]) -> str:
+        return "".join(f"<p>- {b}</p>\n" for b in items)
+
+    def _entries_block(text: str) -> str:
+        out = []
+        for e in parse_entries(text):
+            subtitle = f"<p><em>{e['subtitle']}</em></p>" if e["subtitle"] else ""
+            out.append(
+                f"<p><strong>{e['title']}</strong></p>{subtitle}{_bullets(e['bullets'])}"
+            )
+        return "".join(out)
+
+    summary_html = ""
+    if "SUMMARY" in sections:
+        summary_html = (
+            f"<h2>Summary</h2><p>{sections['SUMMARY'].strip()}</p>"
+        )
+
+    skills_html = ""
+    if "TECHNICAL SKILLS" in sections:
+        rows = [
+            f"<p><strong>{cat}:</strong> {val}</p>"
+            for cat, val in parse_skills(sections["TECHNICAL SKILLS"])
+        ]
+        skills_html = "<h2>Technical Skills</h2>" + "".join(rows)
+
+    exp_html = ""
+    if "EXPERIENCE" in sections:
+        exp_html = "<h2>Experience</h2>" + _entries_block(sections["EXPERIENCE"])
+
+    proj_html = ""
+    if "PROJECTS" in sections:
+        proj_html = "<h2>Projects</h2>" + _entries_block(sections["PROJECTS"])
+
+    edu_html = ""
+    if "EDUCATION" in sections:
+        edu_html = (
+            f"<h2>Education</h2><p>{sections['EDUCATION'].strip()}</p>"
+        )
+
+    contact = resume.get("contact", "")
+    contact_parts = [p.strip() for p in contact.split("|")] if contact else []
+    contact_html = " | ".join(contact_parts)
+    location_html = (
+        f"<p>{resume['location']}</p>" if resume.get("location") else ""
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page {{
+    size: letter;
+    margin: 0.6in 0.7in;
+}}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 11pt;
+    line-height: 1.4;
+    color: #000;
+    background: #fff;
+}}
+h1 {{
+    font-size: 14pt;
+    font-weight: bold;
+    margin-bottom: 2px;
+}}
+h2 {{
+    font-size: 12pt;
+    font-weight: bold;
+    text-transform: uppercase;
+    margin-top: 12px;
+    margin-bottom: 4px;
+}}
+p {{
+    font-size: 11pt;
+    margin-bottom: 2px;
+}}
+strong {{ font-weight: bold; }}
+em {{ font-style: italic; }}
+.header {{ margin-bottom: 6px; }}
+.contact {{ font-size: 10pt; }}
+</style>
+</head>
+<body>
+<div class="header">
+<h1>{resume.get('name', '')}</h1>
+<p>{resume.get('title', '')}</p>
+{location_html}
+<p class="contact">{contact_html}</p>
+</div>
+{summary_html}
+{skills_html}
+{exp_html}
+{proj_html}
+{edu_html}
+</body>
+</html>"""
+
+
 # ── PDF Renderer ─────────────────────────────────────────────────────────
 
 def render_pdf(html: str, output_path: str) -> None:
@@ -355,10 +471,27 @@ def render_pdf(html: str, output_path: str) -> None:
         browser.close()
 
 
+def render_pdf_ats_safe(text_path: Path, output_path: Path | None = None) -> Path:
+    """Render the tailored resume in ATS-safe style. Same parser, stripped HTML.
+
+    Use this for employers whose ATS is known to mis-parse styled PDFs
+    (Workday, Taleo, iCIMS, Oracle Recruiting Cloud).
+    """
+    text_path = Path(text_path)
+    text = text_path.read_text(encoding="utf-8")
+    resume = parse_resume(text)
+    html = build_html_ats_safe(resume)
+    out = Path(output_path) if output_path else text_path.with_suffix(".pdf")
+    render_pdf(html, str(out))
+    log.info("ATS-safe PDF generated: %s", out)
+    return out
+
+
 # ── Public API ───────────────────────────────────────────────────────────
 
 def convert_to_pdf(
-    text_path: Path, output_path: Path | None = None, html_only: bool = False
+    text_path: Path, output_path: Path | None = None, html_only: bool = False,
+    engine: str = "modern",
 ) -> Path:
     """Convert a text resume/cover letter to PDF.
 
@@ -367,6 +500,7 @@ def convert_to_pdf(
         output_path: Optional override for the output path. Defaults to same
             name with .pdf extension.
         html_only: If True, output HTML instead of PDF.
+        engine: 'modern' (styled) or 'ats_safe' (stripped, parser-friendly).
 
     Returns:
         Path to the generated PDF (or HTML) file.
@@ -374,7 +508,10 @@ def convert_to_pdf(
     text_path = Path(text_path)
     text = text_path.read_text(encoding="utf-8")
     resume = parse_resume(text)
-    html = build_html(resume)
+    if engine == "ats_safe":
+        html = build_html_ats_safe(resume)
+    else:
+        html = build_html(resume)
 
     if html_only:
         out = output_path or text_path.with_suffix(".html")
@@ -386,11 +523,42 @@ def convert_to_pdf(
     out = output_path or text_path.with_suffix(".pdf")
     out = Path(out)
     render_pdf(html, str(out))
-    log.info("PDF generated: %s", out)
+    log.info("PDF generated (engine=%s): %s", engine, out)
     return out
 
 
-def batch_convert(limit: int = 50) -> int:
+def _pick_engine_for_url(url: str | None, default: str = "modern") -> str:
+    """Choose 'modern' or 'ats_safe' based on the application URL host.
+
+    Reads config/ats_profiles.yaml for per-domain overrides. ATS platforms
+    known to mis-parse styled resumes (Workday, Taleo, iCIMS, etc.) get
+    `ats_safe` automatically.
+    """
+    if not url:
+        return default
+    try:
+        import yaml
+        from urllib.parse import urlparse
+        from applypilot.config import CONFIG_DIR
+        cfg_path = CONFIG_DIR / "ats_profiles.yaml"
+        if not cfg_path.exists():
+            return default
+        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        host = (urlparse(url).hostname or "").lower()
+        if not host:
+            return default
+        for entry in cfg.get("domains", []) or []:
+            domain = (entry.get("domain") or "").strip().lower()
+            if not domain:
+                continue
+            if host == domain or host.endswith("." + domain):
+                return entry.get("engine", "ats_safe")
+    except Exception:
+        log.debug("ats_profiles lookup failed", exc_info=True)
+    return default
+
+
+def batch_convert(limit: int = 50, engine: str | None = None) -> int:
     """Convert .txt files in TAILORED_DIR that don't have corresponding PDFs.
 
     Scans for .txt files (excluding _JOB.txt and _REPORT.json), checks if a
@@ -398,6 +566,8 @@ def batch_convert(limit: int = 50) -> int:
 
     Args:
         limit: Maximum number of files to convert.
+        engine: Force a specific engine ('modern' or 'ats_safe'). If None,
+            picks per-job based on application_url + ats_profiles.yaml.
 
     Returns:
         Number of PDFs generated.
@@ -407,14 +577,11 @@ def batch_convert(limit: int = 50) -> int:
         return 0
 
     txt_files = sorted(TAILORED_DIR.glob("*.txt"))
-    # Exclude _JOB.txt and _CL.txt files from resume conversion
-    # (they get their own conversion calls)
     candidates = [
         f for f in txt_files
         if not f.name.endswith("_JOB.txt")
     ]
 
-    # Filter to those without a corresponding PDF
     to_convert: list[Path] = []
     for f in candidates:
         pdf_path = f.with_suffix(".pdf")
@@ -427,12 +594,58 @@ def batch_convert(limit: int = 50) -> int:
         log.info("All text files already have PDFs.")
         return 0
 
+    # Per-file engine lookup: query the jobs table for the job whose
+    # tailored_resume_path matches this txt file, and pick the engine
+    # based on its application_url + ats_profiles.yaml.
+    from applypilot.database import get_connection
+    conn = None
+    if engine is None:
+        try:
+            conn = get_connection()
+        except Exception:
+            conn = None
+
     log.info("Converting %d files to PDF...", len(to_convert))
     converted = 0
     for f in to_convert:
         try:
-            convert_to_pdf(f)
+            chosen = engine
+            if chosen is None and conn is not None:
+                row = conn.execute(
+                    "SELECT url, application_url FROM jobs "
+                    "WHERE tailored_resume_path = ?",
+                    (str(f),),
+                ).fetchone()
+                if row:
+                    target_url = row["application_url"] or row["url"]
+                    chosen = _pick_engine_for_url(target_url)
+            chosen = chosen or "modern"
+
+            convert_to_pdf(f, engine=chosen)
             converted += 1
+
+            # Optional: validate PDF round-trip + persist engine choice
+            if conn is not None:
+                pdf_path = f.with_suffix(".pdf")
+                try:
+                    from applypilot.scoring.pdf_validator import validate_pdf
+                    validation = validate_pdf(pdf_path, expected_text=f.read_text(encoding="utf-8"))
+                    conn.execute(
+                        "UPDATE jobs SET tailored_pdf_engine = ?, "
+                        "tailored_pdf_validated = ? "
+                        "WHERE tailored_resume_path = ?",
+                        (chosen, 1 if validation.passed else 0, str(f)),
+                    )
+                    conn.commit()
+                    if not validation.passed:
+                        log.warning(
+                            "PDF validation soft-fail for %s: missing %s",
+                            f.name, validation.missing_tokens,
+                        )
+                except ImportError:
+                    pass
+                except Exception:
+                    log.debug("validator failed", exc_info=True)
         except Exception as e:
             log.error("Failed to convert %s: %s", f.name, e)
 

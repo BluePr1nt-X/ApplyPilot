@@ -87,6 +87,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
     conn = get_connection(path)
+    init_aux_tables(conn)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             -- Discovery stage (smart_extract / job_search)
@@ -180,7 +181,120 @@ _ALL_COLUMNS: dict[str, str] = {
     "apply_duration_ms": "INTEGER",
     "apply_task_id": "TEXT",
     "verification_confidence": "TEXT",
+    # Feedback (PR6) — outcome inferred from recruiter emails
+    "outcome": "TEXT",
+    "outcome_at": "TEXT",
+    "outcome_email_uid": "TEXT",
+    "outcome_confidence": "REAL",
+    "outcome_subject": "TEXT",
+    # PDF rendering metadata (PR7) — which engine was used + round-trip check
+    "tailored_pdf_engine": "TEXT",       # 'modern' | 'ats_safe'
+    "tailored_pdf_validated": "INTEGER", # 1 = round-trip passed, 0 = failed, NULL = not checked
+    # Multi-profile (PR8) — which profile family this job is tagged for
+    "target_profile": "TEXT",            # set by tailor stage based on routing
+    "discovered_with_profile": "TEXT",   # set by discovery stage (active profile at time of crawl)
 }
+
+
+def init_aux_tables(conn: sqlite3.Connection) -> None:
+    """Create auxiliary tables used by the daemon, auth vault, and budget tracking.
+
+    Idempotent. Tables:
+      - daemon_runs:    per-stage execution telemetry for `applypilot watch`
+      - auth_sessions:  session vault state (Playwright storage_state per domain)
+      - captcha_events: per-job CAPTCHA solve events from CapSolver
+      - budget_state:   daily rollups of CAPTCHA + LLM spend and applications sent
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS daemon_runs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            stage           TEXT NOT NULL,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT,
+            status          TEXT,
+            items_processed INTEGER DEFAULT 0,
+            error           TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_daemon_runs_started "
+        "ON daemon_runs(started_at)"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            domain                    TEXT PRIMARY KEY,
+            storage_state_path        TEXT,
+            seeded_at                 TEXT,
+            last_used_at              TEXT,
+            last_refresh_attempted_at TEXT,
+            status                    TEXT,
+            expiry_days               INTEGER DEFAULT 7,
+            notes                     TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS captcha_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_url       TEXT,
+            occurred_at   TEXT NOT NULL,
+            captcha_type  TEXT,
+            task_id       TEXT,
+            cost_usd      REAL DEFAULT 0.0,
+            status        TEXT,
+            error         TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_captcha_events_occurred "
+        "ON captcha_events(occurred_at)"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS budget_state (
+            date_utc           TEXT PRIMARY KEY,
+            captcha_usd        REAL DEFAULT 0.0,
+            llm_usd            REAL DEFAULT 0.0,
+            applications_sent  INTEGER DEFAULT 0
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_accounts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            email           TEXT UNIQUE NOT NULL,
+            host            TEXT NOT NULL,
+            port            INTEGER DEFAULT 993,
+            ssl             INTEGER DEFAULT 1,
+            mailbox         TEXT DEFAULT 'INBOX',
+            last_uid_seen   INTEGER DEFAULT 0,
+            last_polled_at  TEXT,
+            status          TEXT DEFAULT 'active',
+            auth_method     TEXT DEFAULT 'password',  -- 'password' | 'oauth_gmail'
+            notes           TEXT
+        )
+    """)
+    # Forward-migration: add auth_method column to existing tables.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(email_accounts)").fetchall()}
+    if "auth_method" not in cols:
+        conn.execute("ALTER TABLE email_accounts ADD COLUMN auth_method TEXT DEFAULT 'password'")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS feedback_signals (
+            site                  TEXT NOT NULL,
+            week_iso              TEXT NOT NULL,
+            applications_sent     INTEGER DEFAULT 0,
+            acks                  INTEGER DEFAULT 0,
+            rejections            INTEGER DEFAULT 0,
+            interviews            INTEGER DEFAULT 0,
+            offers                INTEGER DEFAULT 0,
+            no_reply_after_30d    INTEGER DEFAULT 0,
+            PRIMARY KEY (site, week_iso)
+        )
+    """)
+
+    conn.commit()
 
 
 def ensure_columns(conn: sqlite3.Connection | None = None) -> list[str]:
@@ -333,6 +447,7 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
     Args:
         conn: Database connection.
         jobs: List of job dicts with keys: url, title, salary, description, location.
+            May also include `discovered_with_profile` to tag the row.
         site: Source site name (e.g. "RemoteOK", "Dice").
         strategy: Extraction strategy used (e.g. "json_ld", "api_response", "css_selectors").
 
@@ -343,16 +458,27 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
     new = 0
     existing = 0
 
+    # Default to the active profile so each job knows which family discovered
+    # it. Per-job override via job["discovered_with_profile"] still wins.
+    default_profile: str | None = None
+    try:
+        from applypilot.profiles import router as _r
+        default_profile = _r.get_active()
+    except Exception:
+        default_profile = None
+
     for job in jobs:
         url = job.get("url")
         if not url:
             continue
         try:
             conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO jobs (url, title, salary, description, location, "
+                "site, strategy, discovered_at, discovered_with_profile) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (url, job.get("title"), job.get("salary"), job.get("description"),
-                 job.get("location"), site, strategy, now),
+                 job.get("location"), site, strategy, now,
+                 job.get("discovered_with_profile") or default_profile),
             )
             new += 1
         except sqlite3.IntegrityError:

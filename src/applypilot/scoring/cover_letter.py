@@ -197,8 +197,22 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     Returns:
         {"generated": int, "errors": int, "elapsed": float}
     """
-    profile = load_profile()
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
+    from applypilot.profiles import router as _profiles
+    _profile_cache: dict[str, tuple[dict, str]] = {}
+
+    def _profile_for(job: dict) -> tuple[str, dict, str]:
+        name = _profiles.resolve_job_profile(job)
+        if name not in _profile_cache:
+            try:
+                pdata = _profiles.load_profile(name)
+                rtxt = _profiles.load_resume_text(name)
+            except FileNotFoundError:
+                pdata = _profiles.load_profile()
+                rtxt = _profiles.load_resume_text()
+                name = _profiles.get_active()
+            _profile_cache[name] = (pdata, rtxt)
+        return (name, *_profile_cache[name])
+
     conn = get_connection()
 
     # Fetch jobs that have tailored resumes but no cover letter yet
@@ -234,6 +248,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     for job in jobs:
         completed += 1
         try:
+            _name, profile, resume_text = _profile_for(job)
             letter = generate_cover_letter(resume_text, job, profile,
                                           validation_mode=validation_mode)
 
